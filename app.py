@@ -20,7 +20,6 @@ model_zip_url = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15
 model_zip_path = os.path.join(base_dir, "model.zip")
 
 raw_audio_path = os.path.join(base_dir, "recorded_audio.raw")
-temp_audio_path = os.path.join(base_dir, "temp.raw")
 wav_audio_path = os.path.join(base_dir, "audio_file.wav")
 transcription_path = os.path.join(base_dir, "transcription.txt")
 feedback_path = os.path.join(base_dir, "feedback_file.txt")
@@ -55,16 +54,16 @@ def convert_to_wav():
         with wave.open(wav_audio_path, 'wb') as wav_file:
             wav_file.setnchannels(1)
             wav_file.setsampwidth(2)
-            wav_file.setframerate(48000)  # Make sure your ESP32 audio is 44.1kHz
+            wav_file.setframerate(48000)  # match your input audio sample rate
             wav_file.writeframes(audio_data.tobytes())
         logging.info("WAV created.")
     except Exception as e:
         logging.error(f"Error in WAV conversion: {e}")
 
-# === Transcribe ===
+# === Transcribe audio ===
 def transcribe_audio():
     try:
-        logging.info("Transcribing...")
+        logging.info("Transcribing audio...")
         download_model()
         model = Model(model_path)
         recognizer = KaldiRecognizer(model, 48000)
@@ -76,7 +75,6 @@ def transcribe_audio():
                 recognizer.AcceptWaveform(data)
         result = json.loads(recognizer.FinalResult())
         text = result.get("text", "")
-        logging.info(f"Transcribed text: '{text}'")
         with open(transcription_path, 'w') as f:
             f.write(text)
         logging.info("Transcription done.")
@@ -132,46 +130,18 @@ def save_summary(total, filler, repetitive):
 
 @app.route('/')
 def home():
-    return "GuidPro server running! POST /stream, then POST /process, or use /upload."
-
-@app.route('/stream', methods=['POST'])
-def stream_audio():
-    try:
-        chunk = request.data
-        with open(temp_audio_path, 'ab') as f:
-            f.write(chunk)
-        logging.info(f"Received chunk of size: {len(chunk)} bytes")
-        return 'OK'
-    except Exception as e:
-        logging.error(f"Stream error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/process', methods=['POST'])
-def process_audio():
-    try:
-        if os.path.exists(temp_audio_path):
-            size = os.path.getsize(temp_audio_path)
-            logging.info(f"temp.raw size before processing: {size} bytes")
-            if size == 0:
-                return jsonify({"error": "No audio data in temp.raw"}), 400
-
-            os.replace(temp_audio_path, raw_audio_path)
-            logging.info("Audio file ready, starting processing...")
-            convert_to_wav()
-            transcribe_audio()
-            return jsonify({"message": "Audio processed successfully."})
-        else:
-            return jsonify({"error": "No audio data to process."}), 400
-    except Exception as e:
-        logging.error(f"Process error: {e}")
-        return jsonify({"error": str(e)}), 500
+    return "GuidPro server running! POST audio file to /upload endpoint."
 
 @app.route('/upload', methods=['POST'])
 def upload_audio():
     try:
+        if 'file' not in request.files:
+            return jsonify({"error": "No file part in the request"}), 400
         file = request.files['file']
+        if file.filename == '':
+            return jsonify({"error": "No selected file"}), 400
         file.save(raw_audio_path)
-        logging.info("Uploaded complete file.")
+        logging.info("Uploaded complete audio file.")
         convert_to_wav()
         transcribe_audio()
         return jsonify({"message": "Audio processed successfully."})
@@ -197,6 +167,5 @@ def serve_file(path, not_found_msg):
     else:
         abort(404, description=not_found_msg)
 
-# === Main ===
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
