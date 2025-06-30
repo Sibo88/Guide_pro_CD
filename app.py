@@ -165,5 +165,34 @@ def serve_file(path, error_message):
     else:
         abort(404, description=error_message)
 
+@app.route('/stream', methods=['POST'])
+def stream_audio():
+    try:
+        chunk = request.data
+        with open('temp.raw', 'ab') as f:
+            f.write(chunk)
+        logging.info(f"Received chunk of size: {len(chunk)} bytes")
+        return 'OK'
+    except Exception as e:
+        logging.error(f"Stream error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/process', methods=['POST'])
+def process_audio():
+    try:
+        # Rename temp.raw to recorded_audio.raw
+        if os.path.exists('temp.raw'):
+            os.rename('temp.raw', raw_audio_path)
+            logging.info("Accumulated audio file ready, starting processing...")
+            convert_to_wav()
+            transcribe_audio()
+            return jsonify({"message": "Audio processed successfully."})
+        else:
+            return jsonify({"error": "No audio data to process."}), 400
+    except Exception as e:
+        logging.error(f"Process error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
