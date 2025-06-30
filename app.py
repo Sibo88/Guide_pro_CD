@@ -5,6 +5,7 @@ import numpy as np
 import json
 import urllib.request
 import zipfile
+import shutil
 from flask import Flask, request, jsonify, send_file, abort
 from vosk import Model, KaldiRecognizer
 
@@ -23,6 +24,8 @@ wav_audio_path = os.path.join(base_dir, "audio_file.wav")
 transcription_path = os.path.join(base_dir, "transcription.txt")
 feedback_path = os.path.join(base_dir, "feedback_file.txt")
 summary_path = os.path.join(base_dir, "summary.txt")
+
+temp_audio_path = os.path.join(base_dir, "temp.raw")  # Temp file for streaming chunks
 
 # Ensure output files exist
 for path in [transcription_path, feedback_path, summary_path]:
@@ -123,29 +126,38 @@ def save_summary(total, filler, repetitive):
 
 @app.route('/')
 def home():
-    return "GuidPro server is running! Use POST /upload to send audio."
+    return "GuidPro server is running! Use POST /stream to stream audio and POST /process to process."
 
-@app.route('/upload', methods=['POST'])
-def upload_audio():
+@app.route('/stream', methods=['POST'])
+def stream_audio():
     try:
-        file = request.files['file']
-        file.save(raw_audio_path)
-        logging.info("Audio file uploaded.")
-        convert_to_wav()
-        transcribe_audio()
-        return jsonify({"message": "Audio processed successfully."})
+        chunk = request.data
+        with open(temp_audio_path, 'ab') as f:
+            f.write(chunk)
+        logging.info(f"Received chunk of size: {len(chunk)} bytes")
+        return 'OK'
     except Exception as e:
-        logging.error(f"Upload error: {e}")
+        logging.error(f"Stream error: {e}")
         return jsonify({"error": str(e)}), 500
 
-# ✅ New route to receive streaming chunks from ESP32
-@app.route('/stream', methods=['POST'])
-def stream():
-    chunk = request.data
-    with open(raw_audio_path, 'ab') as f:
-        f.write(chunk)
-    logging.info(f"Received chunk of size: {len(chunk)} bytes")
-    return 'OK'
+@app.route('/process', methods=['POST'])
+def process_audio():
+    try:
+        if os.path.exists(temp_audio_path) and os.path.getsize(temp_audio_path) > 0:
+            # Copy temp.raw to recorded_audio.raw safely
+            shutil.copyfile(temp_audio_path, raw_audio_path)
+            # Clear temp.raw for next streaming session
+            open(temp_audio_path, 'wb').close()
+
+            logging.info("Audio file copied, starting processing...")
+            convert_to_wav()
+            transcribe_audio()
+            return jsonify({"message": "Audio processed successfully."})
+        else:
+            return jsonify({"error": "No audio data to process."}), 400
+    except Exception as e:
+        logging.error(f"Process error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/transcription.txt')
 def serve_transcription():
@@ -164,35 +176,6 @@ def serve_file(path, error_message):
         return send_file(path, as_attachment=False)
     else:
         abort(404, description=error_message)
-
-@app.route('/stream', methods=['POST'])
-def stream_audio():
-    try:
-        chunk = request.data
-        with open('temp.raw', 'ab') as f:
-            f.write(chunk)
-        logging.info(f"Received chunk of size: {len(chunk)} bytes")
-        return 'OK'
-    except Exception as e:
-        logging.error(f"Stream error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/process', methods=['POST'])
-def process_audio():
-    try:
-        # Rename temp.raw to recorded_audio.raw
-        if os.path.exists('temp.raw'):
-            os.rename('temp.raw', raw_audio_path)
-            logging.info("Accumulated audio file ready, starting processing...")
-            convert_to_wav()
-            transcribe_audio()
-            return jsonify({"message": "Audio processed successfully."})
-        else:
-            return jsonify({"error": "No audio data to process."}), 400
-    except Exception as e:
-        logging.error(f"Process error: {e}")
-        return jsonify({"error": str(e)}), 500
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
