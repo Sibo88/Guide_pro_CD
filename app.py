@@ -55,7 +55,7 @@ def convert_to_wav():
         with wave.open(wav_audio_path, 'wb') as wav_file:
             wav_file.setnchannels(1)
             wav_file.setsampwidth(2)
-            wav_file.setframerate(48000)
+            wav_file.setframerate(48000)  # Make sure your ESP32 audio is 44.1kHz
             wav_file.writeframes(audio_data.tobytes())
         logging.info("WAV created.")
     except Exception as e:
@@ -76,6 +76,7 @@ def transcribe_audio():
                 recognizer.AcceptWaveform(data)
         result = json.loads(recognizer.FinalResult())
         text = result.get("text", "")
+        logging.info(f"Transcribed text: '{text}'")
         with open(transcription_path, 'w') as f:
             f.write(text)
         logging.info("Transcription done.")
@@ -149,6 +150,11 @@ def stream_audio():
 def process_audio():
     try:
         if os.path.exists(temp_audio_path):
+            size = os.path.getsize(temp_audio_path)
+            logging.info(f"temp.raw size before processing: {size} bytes")
+            if size == 0:
+                return jsonify({"error": "No audio data in temp.raw"}), 400
+
             os.replace(temp_audio_path, raw_audio_path)
             logging.info("Audio file ready, starting processing...")
             convert_to_wav()
