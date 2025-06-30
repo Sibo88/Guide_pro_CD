@@ -138,6 +138,15 @@ def upload_audio():
         logging.error(f"Upload error: {e}")
         return jsonify({"error": str(e)}), 500
 
+# ✅ New route to receive streaming chunks from ESP32
+@app.route('/stream', methods=['POST'])
+def stream():
+    chunk = request.data
+    with open(raw_audio_path, 'ab') as f:
+        f.write(chunk)
+    logging.info(f"Received chunk of size: {len(chunk)} bytes")
+    return 'OK'
+
 @app.route('/transcription.txt')
 def serve_transcription():
     return serve_file(transcription_path, "Transcription not found.")
