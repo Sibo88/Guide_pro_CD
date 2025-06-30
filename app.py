@@ -5,7 +5,6 @@ import numpy as np
 import json
 import urllib.request
 import zipfile
-import shutil
 from flask import Flask, request, jsonify, send_file, abort
 from vosk import Model, KaldiRecognizer
 
@@ -13,6 +12,7 @@ app = Flask(__name__)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# === Paths & model info ===
 base_dir = os.path.dirname(os.path.abspath(__file__))
 model_dir = os.path.join(base_dir, "models")
 model_path = os.path.join(model_dir, "vosk-model-small-en-us-0.15")
@@ -20,31 +20,32 @@ model_zip_url = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15
 model_zip_path = os.path.join(base_dir, "model.zip")
 
 raw_audio_path = os.path.join(base_dir, "recorded_audio.raw")
+temp_audio_path = os.path.join(base_dir, "temp.raw")
 wav_audio_path = os.path.join(base_dir, "audio_file.wav")
 transcription_path = os.path.join(base_dir, "transcription.txt")
 feedback_path = os.path.join(base_dir, "feedback_file.txt")
 summary_path = os.path.join(base_dir, "summary.txt")
 
-temp_audio_path = os.path.join(base_dir, "temp.raw")  # Temp file for streaming chunks
-
-# Ensure output files exist
+# Make sure text files exist
 for path in [transcription_path, feedback_path, summary_path]:
     if not os.path.exists(path):
         open(path, 'w').close()
 
+# === Download Vosk model if missing ===
 def download_model():
     if not os.path.exists(model_path):
         logging.info("Vosk model not found. Downloading...")
         os.makedirs(model_dir, exist_ok=True)
         urllib.request.urlretrieve(model_zip_url, model_zip_path)
-        logging.info("Model zip downloaded. Extracting...")
+        logging.info("Extracting model...")
         with zipfile.ZipFile(model_zip_path, 'r') as zip_ref:
             zip_ref.extractall(model_dir)
         os.remove(model_zip_path)
-        logging.info("Model extracted and zip deleted.")
+        logging.info("Model ready.")
     else:
         logging.info("Vosk model already exists.")
 
+# === Convert raw to WAV ===
 def convert_to_wav():
     try:
         logging.info("Converting raw audio to WAV...")
@@ -54,33 +55,35 @@ def convert_to_wav():
         with wave.open(wav_audio_path, 'wb') as wav_file:
             wav_file.setnchannels(1)
             wav_file.setsampwidth(2)
-            wav_file.setframerate(44100)
+            wav_file.setframerate(48000)
             wav_file.writeframes(audio_data.tobytes())
-        logging.info("WAV file created.")
+        logging.info("WAV created.")
     except Exception as e:
-        logging.error(f"Error during WAV conversion: {e}")
+        logging.error(f"Error in WAV conversion: {e}")
 
+# === Transcribe ===
 def transcribe_audio():
     try:
-        logging.info("Transcribing audio...")
+        logging.info("Transcribing...")
         download_model()
         model = Model(model_path)
-        recognizer = KaldiRecognizer(model, 44100)
+        recognizer = KaldiRecognizer(model, 48000)
         with wave.open(wav_audio_path, 'rb') as wf:
             while True:
                 data = wf.readframes(4000)
-                if len(data) == 0:
+                if not data:
                     break
                 recognizer.AcceptWaveform(data)
         result = json.loads(recognizer.FinalResult())
         text = result.get("text", "")
         with open(transcription_path, 'w') as f:
             f.write(text)
-        logging.info("Transcription complete.")
+        logging.info("Transcription done.")
         analyze_text(text)
     except Exception as e:
         logging.error(f"Error during transcription: {e}")
 
+# === Analyze text for feedback & summary ===
 def analyze_text(text):
     try:
         words = text.split()
@@ -88,8 +91,8 @@ def analyze_text(text):
         for word in words:
             word = word.lower().strip(".,!?;:\"'()[]{}")
             word_count[word] = word_count.get(word, 0) + 1
-        repetitive = {word: count for word, count in word_count.items() if count > 1}
-        filler = {word: word_count.get(word, 0) for word in {"uh", "ah", "um", "so", "because"}}
+        repetitive = {w: c for w, c in word_count.items() if c > 1}
+        filler = {w: word_count.get(w, 0) for w in {"uh", "ah", "um", "so", "because"}}
         total = len(words)
         save_feedback(repetitive, filler, total)
         save_summary(total, filler, repetitive)
@@ -100,11 +103,11 @@ def save_feedback(repetitive, filler, total):
     try:
         with open(feedback_path, 'w') as f:
             f.write("=== Feedback ===\n\nRepetitive Words:\n")
-            for word, count in repetitive.items():
-                f.write(f"{word}: {count}\n")
+            for w, c in repetitive.items():
+                f.write(f"{w}: {c}\n")
             f.write("\nFiller Words:\n")
-            for word, count in filler.items():
-                f.write(f"{word}: {count}\n")
+            for w, c in filler.items():
+                f.write(f"{w}: {c}\n")
             f.write(f"\nTotal Word Count: {total}\n")
         logging.info("Feedback saved.")
     except Exception as e:
@@ -124,9 +127,11 @@ def save_summary(total, filler, repetitive):
     except Exception as e:
         logging.error(f"Error saving summary: {e}")
 
+# === Routes ===
+
 @app.route('/')
 def home():
-    return "GuidPro server is running! Use POST /stream to stream audio and POST /process to process."
+    return "GuidPro server running! POST /stream, then POST /process, or use /upload."
 
 @app.route('/stream', methods=['POST'])
 def stream_audio():
@@ -143,13 +148,9 @@ def stream_audio():
 @app.route('/process', methods=['POST'])
 def process_audio():
     try:
-        if os.path.exists(temp_audio_path) and os.path.getsize(temp_audio_path) > 0:
-            # Copy temp.raw to recorded_audio.raw safely
-            shutil.copyfile(temp_audio_path, raw_audio_path)
-            # Clear temp.raw for next streaming session
-            open(temp_audio_path, 'wb').close()
-
-            logging.info("Audio file copied, starting processing...")
+        if os.path.exists(temp_audio_path):
+            os.replace(temp_audio_path, raw_audio_path)
+            logging.info("Audio file ready, starting processing...")
             convert_to_wav()
             transcribe_audio()
             return jsonify({"message": "Audio processed successfully."})
@@ -157,6 +158,19 @@ def process_audio():
             return jsonify({"error": "No audio data to process."}), 400
     except Exception as e:
         logging.error(f"Process error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/upload', methods=['POST'])
+def upload_audio():
+    try:
+        file = request.files['file']
+        file.save(raw_audio_path)
+        logging.info("Uploaded complete file.")
+        convert_to_wav()
+        transcribe_audio()
+        return jsonify({"message": "Audio processed successfully."})
+    except Exception as e:
+        logging.error(f"Upload error: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/transcription.txt')
@@ -171,11 +185,12 @@ def serve_feedback():
 def serve_summary():
     return serve_file(summary_path, "Summary not found.")
 
-def serve_file(path, error_message):
+def serve_file(path, not_found_msg):
     if os.path.exists(path):
         return send_file(path, as_attachment=False)
     else:
-        abort(404, description=error_message)
+        abort(404, description=not_found_msg)
 
+# === Main ===
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
