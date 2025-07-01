@@ -30,6 +30,7 @@ model_path = os.path.join(model_dir, "vosk-model-en-us-daanzu-20200905")
 model_zip_url = "https://alphacephei.com/vosk/models/vosk-model-en-us-daanzu-20200905.zip"
 model_zip_path = os.path.join(base_dir, "model.zip")
 
+
 raw_audio_path = os.path.join(base_dir, "recorded_audio.raw")
 wav_audio_path = os.path.join(base_dir, "audio_file.wav")
 transcription_path = os.path.join(base_dir, "transcription.txt")
