@@ -2,3 +2,6 @@ Flask==3.0.2
 vosk==0.3.45
 numpy==1.26.4
 firebase-admin==6.4.0
+pydub
+language_tool_python
+
