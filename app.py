@@ -15,7 +15,10 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # === Firebase setup ===
-cred = credentials.Certificate("serviceAccountKey.json")  # make sure this file exists
+firebase_config_json = os.environ.get('FIREBASE_CONFIG')
+if not firebase_config_json:
+    raise Exception("Missing FIREBASE_CONFIG environment variable")
+cred = credentials.Certificate(json.loads(firebase_config_json))
 firebase_admin.initialize_app(cred, {
     'databaseURL': 'https://guidepro-9c28f-default-rtdb.firebaseio.com/'
 })
@@ -62,7 +65,7 @@ def convert_to_wav():
         with wave.open(wav_audio_path, 'wb') as wav_file:
             wav_file.setnchannels(1)
             wav_file.setsampwidth(2)
-            wav_file.setframerate(48000)  # match input sample rate
+            wav_file.setframerate(48000)
             wav_file.writeframes(audio_data.tobytes())
         logging.info("WAV created.")
     except Exception as e:
@@ -87,7 +90,7 @@ def transcribe_and_push_to_firebase():
             f.write(text)
         logging.info("Transcription done.")
 
-        # Analyze and generate feedback & summary
+        # Analyze
         words = text.split()
         word_count = {}
         for word in words:
@@ -104,9 +107,13 @@ def transcribe_and_push_to_firebase():
         # Push to Firebase
         now = datetime.now().strftime("%Y_%m_%d_%H%M%S")
         session_id = f"session_{now}"
-        user_id = "user_1"  # you can later replace this with real user_id from app
+        user_id = "user_1"  # replace with real user ID later
 
         ref = db.reference(f'guidpro_results/{user_id}/{session_id}')
+        pres_score = max(100 - len(repetitive) * 2, 0)
+        time_score = max(100 - sum(filler.values()) * 2, 0)
+        overall = (pres_score + time_score) / 2
+
         ref.set({
             'transcription': text,
             'feedback': {
@@ -115,9 +122,9 @@ def transcribe_and_push_to_firebase():
                 'total_word_count': total
             },
             'summary': {
-                'presentation_score': max(100 - len(repetitive)*2, 0),
-                'time_score': max(100 - sum(filler.values())*2, 0),
-                'overall_score': (max(100 - len(repetitive)*2, 0) + max(100 - sum(filler.values())*2, 0)) / 2
+                'presentation_score': pres_score,
+                'time_score': time_score,
+                'overall_score': overall
             }
         })
         logging.info(f"Pushed results to Firebase under {user_id}/{session_id}")
@@ -194,4 +201,5 @@ def serve_file(path, not_found_msg):
         abort(404, description=not_found_msg)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
