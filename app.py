@@ -194,6 +194,11 @@ def serve_feedback():
 def serve_summary():
     return serve_file(summary_path, "Summary not found.")
 
+@app.route('/audio.wav')
+def serve_audio():
+    return serve_file(wav_audio_path, "Audio not found.")
+
+
 def serve_file(path, not_found_msg):
     if os.path.exists(path):
         return send_file(path, as_attachment=False)
