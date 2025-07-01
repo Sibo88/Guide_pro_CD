@@ -1,4 +1,4 @@
-flask
-vosk
-pydub
-numpy
+Flask==2.3.2
+numpy==1.25.2
+vosk==0.3.45
+firebase-admin==6.0.1
