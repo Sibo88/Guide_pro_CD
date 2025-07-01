@@ -29,8 +29,8 @@ import os
 # === Paths & model info ===
 base_dir = os.path.dirname(os.path.abspath(__file__))
 model_dir = os.path.join(base_dir, "models")
-model_path = os.path.join(model_dir, "vosk-model-small-en-us-0.15")
-model_zip_url = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
+model_path = os.path.join(model_dir, "vosk-model-small-en-in-0.4")
+model_zip_url = "https://alphacephei.com/vosk/models/vosk-model-small-en-in-0.4.zip"
 model_zip_path = os.path.join(base_dir, "model.zip")
 
 
