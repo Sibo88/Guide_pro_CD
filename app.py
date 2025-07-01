@@ -5,12 +5,20 @@ import numpy as np
 import json
 import urllib.request
 import zipfile
+from datetime import datetime
 from flask import Flask, request, jsonify, send_file, abort
 from vosk import Model, KaldiRecognizer
+import firebase_admin
+from firebase_admin import credentials, db
 
 app = Flask(__name__)
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# === Firebase setup ===
+cred = credentials.Certificate("serviceAccountKey.json")  # make sure this file exists
+firebase_admin.initialize_app(cred, {
+    'databaseURL': 'https://guidepro-9c28f-default-rtdb.firebaseio.com/'
+})
 
 # === Paths & model info ===
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -25,7 +33,7 @@ transcription_path = os.path.join(base_dir, "transcription.txt")
 feedback_path = os.path.join(base_dir, "feedback_file.txt")
 summary_path = os.path.join(base_dir, "summary.txt")
 
-# Make sure text files exist
+# Ensure text files exist
 for path in [transcription_path, feedback_path, summary_path]:
     if not os.path.exists(path):
         open(path, 'w').close()
@@ -44,7 +52,7 @@ def download_model():
     else:
         logging.info("Vosk model already exists.")
 
-# === Convert raw to WAV ===
+# === Convert raw audio to WAV ===
 def convert_to_wav():
     try:
         logging.info("Converting raw audio to WAV...")
@@ -54,16 +62,16 @@ def convert_to_wav():
         with wave.open(wav_audio_path, 'wb') as wav_file:
             wav_file.setnchannels(1)
             wav_file.setsampwidth(2)
-            wav_file.setframerate(48000)  # match your input audio sample rate
+            wav_file.setframerate(48000)  # match input sample rate
             wav_file.writeframes(audio_data.tobytes())
         logging.info("WAV created.")
     except Exception as e:
         logging.error(f"Error in WAV conversion: {e}")
 
-# === Transcribe audio ===
-def transcribe_audio():
+# === Transcribe audio and push results ===
+def transcribe_and_push_to_firebase():
     try:
-        logging.info("Transcribing audio...")
+        logging.info("Starting transcription...")
         download_model()
         model = Model(model_path)
         recognizer = KaldiRecognizer(model, 48000)
@@ -78,13 +86,8 @@ def transcribe_audio():
         with open(transcription_path, 'w') as f:
             f.write(text)
         logging.info("Transcription done.")
-        analyze_text(text)
-    except Exception as e:
-        logging.error(f"Error during transcription: {e}")
 
-# === Analyze text for feedback & summary ===
-def analyze_text(text):
-    try:
+        # Analyze and generate feedback & summary
         words = text.split()
         word_count = {}
         for word in words:
@@ -93,10 +96,34 @@ def analyze_text(text):
         repetitive = {w: c for w, c in word_count.items() if c > 1}
         filler = {w: word_count.get(w, 0) for w in {"uh", "ah", "um", "so", "because"}}
         total = len(words)
+
+        # Save locally
         save_feedback(repetitive, filler, total)
         save_summary(total, filler, repetitive)
+
+        # Push to Firebase
+        now = datetime.now().strftime("%Y_%m_%d_%H%M%S")
+        session_id = f"session_{now}"
+        user_id = "user_1"  # you can later replace this with real user_id from app
+
+        ref = db.reference(f'guidpro_results/{user_id}/{session_id}')
+        ref.set({
+            'transcription': text,
+            'feedback': {
+                'repetitive_words': repetitive,
+                'filler_words': filler,
+                'total_word_count': total
+            },
+            'summary': {
+                'presentation_score': max(100 - len(repetitive)*2, 0),
+                'time_score': max(100 - sum(filler.values())*2, 0),
+                'overall_score': (max(100 - len(repetitive)*2, 0) + max(100 - sum(filler.values())*2, 0)) / 2
+            }
+        })
+        logging.info(f"Pushed results to Firebase under {user_id}/{session_id}")
+
     except Exception as e:
-        logging.error(f"Error analyzing text: {e}")
+        logging.error(f"Error in transcription & Firebase: {e}")
 
 def save_feedback(repetitive, filler, total):
     try:
@@ -108,7 +135,7 @@ def save_feedback(repetitive, filler, total):
             for w, c in filler.items():
                 f.write(f"{w}: {c}\n")
             f.write(f"\nTotal Word Count: {total}\n")
-        logging.info("Feedback saved.")
+        logging.info("Feedback saved locally.")
     except Exception as e:
         logging.error(f"Error saving feedback: {e}")
 
@@ -122,29 +149,28 @@ def save_summary(total, filler, repetitive):
             f.write(f"Presentation Score: {pres_score}\n")
             f.write(f"Time Score: {time_score}\n")
             f.write(f"Overall Score: {overall}\n")
-        logging.info("Summary saved.")
+        logging.info("Summary saved locally.")
     except Exception as e:
         logging.error(f"Error saving summary: {e}")
 
 # === Routes ===
-
 @app.route('/')
 def home():
-    return "GuidPro server running! POST audio file to /upload endpoint."
+    return "✅ GuidPro server running! POST raw audio to /upload"
 
 @app.route('/upload', methods=['POST'])
 def upload_audio():
     try:
         if 'file' not in request.files:
-            return jsonify({"error": "No file part in the request"}), 400
+            return jsonify({"error": "No file part in request"}), 400
         file = request.files['file']
         if file.filename == '':
             return jsonify({"error": "No selected file"}), 400
         file.save(raw_audio_path)
-        logging.info("Uploaded complete audio file.")
+        logging.info("Audio uploaded. Starting processing...")
         convert_to_wav()
-        transcribe_audio()
-        return jsonify({"message": "Audio processed successfully."})
+        transcribe_and_push_to_firebase()
+        return jsonify({"message": "Processed and uploaded to Firebase successfully!"})
     except Exception as e:
         logging.error(f"Upload error: {e}")
         return jsonify({"error": str(e)}), 500
