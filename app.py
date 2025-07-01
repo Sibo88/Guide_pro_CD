@@ -12,8 +12,6 @@ import firebase_admin
 from firebase_admin import credentials, db
 import requests
 import time
-from pydub import AudioSegment, effects
-import language_tool_python
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -21,14 +19,14 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # === Firebase setup ===
 firebase_config_json = os.environ.get('FIREBASE_CONFIG')
 if not firebase_config_json:
-    raise Exception("Missing FIREBASE_CONFIG env var")
+    raise Exception("Missing FIREBASE_CONFIG environment variable")
 cred = credentials.Certificate(json.loads(firebase_config_json))
 firebase_admin.initialize_app(cred, {
     'databaseURL': 'https://guidepro-9c28f-default-rtdb.firebaseio.com/'
 })
 
 # === AssemblyAI setup ===
-ASSEMBLYAI_API_KEY = os.environ.get("ASSEMBLYAI_API_KEY")
+ASSEMBLYAI_API_KEY = os.environ.get("ASSEMBLYAI_API_KEY")  # store your API key as env var
 
 # === Paths & model info ===
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -45,181 +43,213 @@ summary_path = os.path.join(base_dir, "summary.txt")
 
 # Ensure text files exist
 for path in [transcription_path, feedback_path, summary_path]:
-    open(path, 'a').close()
+    if not os.path.exists(path):
+        open(path, 'w').close()
 
 # === Download Vosk model if missing ===
 def download_model():
     if not os.path.exists(model_path):
-        logging.info("Downloading Vosk model...")
+        logging.info("Vosk model not found. Downloading...")
         os.makedirs(model_dir, exist_ok=True)
         urllib.request.urlretrieve(model_zip_url, model_zip_path)
+        logging.info("Extracting model...")
         with zipfile.ZipFile(model_zip_path, 'r') as zip_ref:
             zip_ref.extractall(model_dir)
         os.remove(model_zip_path)
+        logging.info("Model ready.")
     else:
         logging.info("Vosk model already exists.")
 
-# === Preprocess audio (mono, normalize, 16kHz) ===
-def preprocess_audio():
-    logging.info("Preprocessing audio...")
-    sound = AudioSegment.from_raw(raw_audio_path, sample_width=2, frame_rate=48000, channels=1)
-    sound = sound.set_channels(1).set_frame_rate(16000)
-    sound = effects.normalize(sound)
-    sound.export(wav_audio_path, format="wav")
-    logging.info("Audio preprocessed and saved as WAV.")
+# === Convert raw audio to WAV ===
+def convert_to_wav():
+    try:
+        logging.info("Converting raw audio to WAV...")
+        with open(raw_audio_path, 'rb') as raw_file:
+            raw_data = raw_file.read()
+        audio_data = np.frombuffer(raw_data, dtype=np.int16)
+        with wave.open(wav_audio_path, 'wb') as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(48000)
+            wav_file.writeframes(audio_data.tobytes())
+        logging.info("WAV created.")
+    except Exception as e:
+        logging.error(f"Error in WAV conversion: {e}")
 
-# === Transcribe with Vosk ===
+# === Transcribe using Vosk ===
 def transcribe_with_vosk():
     download_model()
     model = Model(model_path)
-    rec = KaldiRecognizer(model, 16000)
+    recognizer = KaldiRecognizer(model, 48000)
+    text = ""
     with wave.open(wav_audio_path, 'rb') as wf:
         while True:
             data = wf.readframes(4000)
             if not data:
                 break
-            rec.AcceptWaveform(data)
-    result = json.loads(rec.FinalResult())
+            recognizer.AcceptWaveform(data)
+    result = json.loads(recognizer.FinalResult())
     text = result.get("text", "")
-    logging.info(f"Vosk text: '{text}'")
+    logging.info(f"Vosk transcription: '{text}'")
     return text
 
-# === Transcribe with AssemblyAI (advanced) ===
+# === Transcribe using AssemblyAI ===
 def transcribe_with_assemblyai():
     logging.info("Uploading to AssemblyAI...")
     with open(wav_audio_path, 'rb') as f:
-        upload_resp = requests.post(
+        upload_response = requests.post(
             'https://api.assemblyai.com/v2/upload',
             headers={'authorization': ASSEMBLYAI_API_KEY},
             files={'file': f}
         )
-    upload_url = upload_resp.json()['upload_url']
+    upload_url = upload_response.json()['upload_url']
 
-    logging.info("Starting transcription...")
-    trans_resp = requests.post(
+    logging.info("Starting transcription at AssemblyAI...")
+    transcript_response = requests.post(
         'https://api.assemblyai.com/v2/transcript',
-        json={
-            'audio_url': upload_url,
-            'punctuate': True,
-            'format_text': True,
-            'disfluencies': True
-        },
+        json={'audio_url': upload_url},
         headers={'authorization': ASSEMBLYAI_API_KEY}
     )
-    tid = trans_resp.json()['id']
+    transcript_id = transcript_response.json()['id']
 
+    # Poll for completion
     while True:
-        poll = requests.get(f'https://api.assemblyai.com/v2/transcript/{tid}',
-                            headers={'authorization': ASSEMBLYAI_API_KEY})
-        status = poll.json()['status']
+        polling_response = requests.get(
+            f'https://api.assemblyai.com/v2/transcript/{transcript_id}',
+            headers={'authorization': ASSEMBLYAI_API_KEY}
+        )
+        status = polling_response.json()['status']
         if status == 'completed':
-            text = poll.json()['text']
-            logging.info(f"AssemblyAI text: '{text}'")
+            text = polling_response.json()['text']
+            logging.info(f"AssemblyAI transcription: '{text}'")
             return text
         elif status == 'failed':
-            logging.error("AssemblyAI failed.")
+            logging.error("AssemblyAI transcription failed.")
             return ""
-        time.sleep(3)
+        else:
+            time.sleep(3)
 
-# === Grammar correction ===
-def grammar_correct(text):
-    tool = language_tool_python.LanguageTool('en-US')
-    matches = tool.check(text)
-    corrected = language_tool_python.utils.correct(text, matches)
-    logging.info(f"Corrected text: '{corrected}'")
-    return corrected
-
-# === Analyze & push to Firebase ===
+# === Analyze & push results ===
 def analyze_and_push(text):
+    # Save transcription
     with open(transcription_path, 'w') as f:
         f.write(text)
 
     words = text.split()
-    total = len(words)
     word_count = {}
-    for w in words:
-        w = w.lower().strip(".,!?;:\"'()[]{}")
-        word_count[w] = word_count.get(w, 0) + 1
+    for word in words:
+        word = word.lower().strip(".,!?;:\"'()[]{}")
+        word_count[word] = word_count.get(word, 0) + 1
     repetitive = {w: c for w, c in word_count.items() if c > 1}
-    filler = {w: word_count.get(w, 0) for w in {'uh', 'um', 'so', 'ah', 'because'}}
-    
+    filler = {w: word_count.get(w, 0) for w in {"uh", "ah", "um", "so", "because"}}
+    total = len(words)
+
     save_feedback(repetitive, filler, total)
     save_summary(total, filler, repetitive)
 
-    pres_score = max(100 - len(repetitive)*2, 0)
-    time_score = max(100 - sum(filler.values())*2, 0)
-    overall = (pres_score+time_score)/2
-
     now = datetime.now().strftime("%Y_%m_%d_%H%M%S")
-    user_id = "user_1"
-    ref = db.reference(f'guidpro_results/{user_id}/session_{now}')
+    session_id = f"session_{now}"
+    user_id = "user_1"  # replace with real user ID
+
+    ref = db.reference(f'guidpro_results/{user_id}/{session_id}')
+    pres_score = max(100 - len(repetitive) * 2, 0)
+    time_score = max(100 - sum(filler.values()) * 2, 0)
+    overall = (pres_score + time_score) / 2
+
     ref.set({
         'transcription': text,
-        'feedback': {'repetitive_words': repetitive, 'filler_words': filler, 'total_word_count': total},
-        'summary': {'presentation_score': pres_score, 'time_score': time_score, 'overall_score': overall}
+        'feedback': {
+            'repetitive_words': repetitive,
+            'filler_words': filler,
+            'total_word_count': total
+        },
+        'summary': {
+            'presentation_score': pres_score,
+            'time_score': time_score,
+            'overall_score': overall
+        }
     })
-    logging.info(f"Pushed to Firebase under {user_id}/session_{now}")
+    logging.info(f"Pushed results to Firebase under {user_id}/{session_id}")
 
 def save_feedback(repetitive, filler, total):
-    with open(feedback_path, 'w') as f:
-        f.write("=== Feedback ===\nRepetitive Words:\n")
-        for k,v in repetitive.items(): f.write(f"{k}: {v}\n")
-        f.write("\nFiller Words:\n")
-        for k,v in filler.items(): f.write(f"{k}: {v}\n")
-        f.write(f"\nTotal Word Count: {total}\n")
+    try:
+        with open(feedback_path, 'w') as f:
+            f.write("=== Feedback ===\n\nRepetitive Words:\n")
+            for w, c in repetitive.items():
+                f.write(f"{w}: {c}\n")
+            f.write("\nFiller Words:\n")
+            for w, c in filler.items():
+                f.write(f"{w}: {c}\n")
+            f.write(f"\nTotal Word Count: {total}\n")
+        logging.info("Feedback saved locally.")
+    except Exception as e:
+        logging.error(f"Error saving feedback: {e}")
 
 def save_summary(total, filler, repetitive):
-    pres = max(100 - len(repetitive)*2,0)
-    time = max(100 - sum(filler.values())*2,0)
-    ov = (pres+time)/2
-    with open(summary_path,'w') as f:
-        f.write(f"=== Summary ===\nPresentation Score: {pres}\nTime Score: {time}\nOverall Score: {ov}\n")
+    try:
+        pres_score = max(100 - len(repetitive) * 2, 0)
+        time_score = max(100 - sum(filler.values()) * 2, 0)
+        overall = (pres_score + time_score) / 2
+        with open(summary_path, 'w') as f:
+            f.write("=== Summary ===\n")
+            f.write(f"Presentation Score: {pres_score}\n")
+            f.write(f"Time Score: {time_score}\n")
+            f.write(f"Overall Score: {overall}\n")
+        logging.info("Summary saved locally.")
+    except Exception as e:
+        logging.error(f"Error saving summary: {e}")
 
-# === Upload route with smart fallback ===
+# === Routes ===
+@app.route('/')
+def home():
+    return "✅ GuidPro server running! POST raw audio to /upload"
+
 @app.route('/upload', methods=['POST'])
 def upload_audio():
     try:
-        if 'file' not in request.files: return jsonify({"error":"No file"}),400
-        f = request.files['file']
-        f.save(raw_audio_path)
-        preprocess_audio()
+        if 'file' not in request.files:
+            return jsonify({"error": "No file part in request"}), 400
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({"error": "No selected file"}), 400
+        file.save(raw_audio_path)
+        logging.info("Audio uploaded. Starting processing...")
+        convert_to_wav()
 
-        vosk_text = transcribe_with_vosk()
-        filler_count = sum(1 for w in vosk_text.split() if w in {'uh','um','so','ah','because'})
-
-        # fallback if short OR many fillers
-        if len(vosk_text.split())<5 or filler_count>5:
-            logging.info("Fallback to AssemblyAI...")
+        # Hybrid transcription: Vosk first, fallback to AssemblyAI
+        text = transcribe_with_vosk()
+        if len(text.split()) < 5:
+            logging.info("Vosk result too short → fallback to AssemblyAI...")
             text = transcribe_with_assemblyai()
-        else:
-            text = vosk_text
 
-        corrected = grammar_correct(text)
-        analyze_and_push(corrected)
-        return jsonify({"message":"Processed & uploaded!", "transcript":corrected})
+        analyze_and_push(text)
+        return jsonify({"message": "Processed & uploaded to Firebase!", "transcript": text})
     except Exception as e:
-        logging.error(f"Error: {e}")
-        return jsonify({"error":str(e)}),500
-
-# === Other routes unchanged ===
-@app.route('/')
-def home(): return "✅ GuidPro improved server running!"
+        logging.error(f"Upload error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/transcription.txt')
-def serve_transcription(): return serve_file(transcription_path,"Not found.")
+def serve_transcription():
+    return serve_file(transcription_path, "Transcription not found.")
 
 @app.route('/feedback.txt')
-def serve_feedback(): return serve_file(feedback_path,"Not found.")
+def serve_feedback():
+    return serve_file(feedback_path, "Feedback not found.")
 
 @app.route('/summary.txt')
-def serve_summary(): return serve_file(summary_path,"Not found.")
+def serve_summary():
+    return serve_file(summary_path, "Summary not found.")
 
 @app.route('/audio.wav')
-def serve_audio(): return serve_file(wav_audio_path,"Not found.")
+def serve_audio():
+    return serve_file(wav_audio_path, "Audio not found.")
 
-def serve_file(path,msg):
-    return send_file(path) if os.path.exists(path) else abort(404,description=msg)
+def serve_file(path, not_found_msg):
+    if os.path.exists(path):
+        return send_file(path, as_attachment=False)
+    else:
+        abort(404, description=not_found_msg)
 
-if __name__=="__main__":
-    port=int(os.environ.get("PORT",5000))
-    app.run(host="0.0.0.0",port=port)
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
