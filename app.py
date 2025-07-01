@@ -24,11 +24,15 @@ firebase_admin.initialize_app(cred, {
 })
 
 # === Paths & model info ===
+import os
+
+# === Paths & model info ===
 base_dir = os.path.dirname(os.path.abspath(__file__))
 model_dir = os.path.join(base_dir, "models")
-model_path = os.path.join(model_dir, "vosk-model-en-us-daanzu-20200905")
-model_zip_url = "https://alphacephei.com/vosk/models/vosk-model-en-us-daanzu-20200905.zip"
+model_path = os.path.join(model_dir, "vosk-model-en-us-0.42-gigaspeech")
+model_zip_url = "https://alphacephei.com/vosk/models/vosk-model-en-us-0.42-gigaspeech.zip"
 model_zip_path = os.path.join(base_dir, "model.zip")
+
 
 
 raw_audio_path = os.path.join(base_dir, "recorded_audio.raw")
